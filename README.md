@@ -3,3 +3,4 @@ A module for Volumetric Lighting on ROBLOX. Includes heavy optimisation, and mul
 
 Forked from a plugin by NOPESbucket, heavily optimised with new features. 
 
+May include bugs. I'm updating it as much as possible.
