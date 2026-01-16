@@ -2,6 +2,7 @@
 A module for Volumetric Lighting on ROBLOX. Includes heavy optimisation, and multiple options for higher performance.
 
 Forked from a plugin by NOPESbucket, heavily optimised with new features. 
+ParallelScheduler is not included, it can be found in the ROBLOX marketplace. A new ParallelScheduler will be custom written by me in the near future.
 
 May include bugs. I'm updating it as much as possible.
 
