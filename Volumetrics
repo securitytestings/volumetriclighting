@@ -1,0 +1,462 @@
+local RunService = game:GetService("RunService")
+local player = game.Players.LocalPlayer
+local SP = game:GetService("StarterPlayer")
+local Players = game:GetService("Players")
+local HTTPService = game:GetService("HttpService")
+local BatchLoadingModule = require(script.Parent.BatchLoading)
+
+local BUFFER = {}
+
+
+-- Camera Anchor Instance
+local cameraPart = Instance.new("Part")
+cameraPart.CanCollide = false
+cameraPart.CanQuery = false
+cameraPart.CanTouch = false
+cameraPart.CastShadow = false
+cameraPart.Massless = true
+cameraPart.Anchored = true
+cameraPart.Transparency = 1
+cameraPart.Size = Vector3.new(1, 1, 1)
+cameraPart.Material = Enum.Material.SmoothPlastic
+
+local function createVolumetricBeam(self, transparency: number, lightEmission: number, ratioX: number, ratioY: number, spacing: number, index: number): Beam
+	local beam = Instance.new("Beam")
+	beam.Color = ColorSequence.new(Color3.new(.8, .8, .8))
+	beam.Transparency = NumberSequence.new(transparency)
+	beam.Segments = 1
+	beam.TextureMode = Enum.TextureMode.Static
+	beam.TextureSpeed = 0
+	beam.LightEmission = lightEmission
+	beam.LightInfluence = 1
+	beam.Width0 = (ratioY * index) * (spacing * 2)
+	beam.Width1 = (ratioY * index) * (spacing * 2)
+
+	return beam
+end
+
+local function WaitForBatch()
+	local completed = false
+
+	local conn
+	conn = script.Parent.BatchLoading.Event.Event:Connect(function()
+		completed = true
+		conn:Disconnect()
+	end)
+
+	repeat RunService.Heartbeat:Wait() until completed
+
+	RunService.RenderStepped:Wait()
+	RunService.RenderStepped:Wait()
+end
+
+local function createVolumetricBillboard(self, transparency: number, viewportSize: Vector2)
+	local billboard = Instance.new("BillboardGui")
+	local frame = Instance.new("Frame")
+
+	billboard.Size = UDim2.fromOffset(viewportSize.X, viewportSize.Y)
+	billboard.LightInfluence = 1
+	billboard.ZIndexBehavior = Enum.ZIndexBehavior.Global
+	frame.Name = "InnerFrame"
+
+	frame.Position = UDim2.new(0, -100, 0, -100)
+	frame.Size = UDim2.new(1, 200, 1, 200)
+	frame.BackgroundTransparency = transparency
+	frame.AutoLocalize = false
+	frame.Interactable = false
+	frame.Active = false
+	frame.Parent = billboard
+
+	return billboard
+end
+
+local function renderBillboardVolumetrics(self)
+	if not self.CamPart then return end
+	self.CamPart.Size = Vector3.new(1, 1, 1)
+	local viewport = self._camViewport
+
+	if #self._layers1 > 0 then
+		for i, v in self._layers1 do
+			if i > self.Depth then
+				v.Enabled = false
+				continue
+			end
+			v.Enabled = self.Visible
+		end
+	end
+
+	for i = 1, self.Depth do
+		local index = (i-1) * self.LayerSpacing1
+
+		local billboardGui = self._layers1[i]
+		local att: Attachment
+
+		if billboardGui == nil then
+			att = Instance.new("Attachment")
+			billboardGui = createVolumetricBillboard(self, self.Transparency, viewport)
+			billboardGui.Parent = att
+			local UUID = self._layerBillboardUUIDs[i]
+			if not UUID then
+				UUID = HTTPService:GenerateGUID(false)
+				self._layerBillboardUUIDs[i] = UUID
+			end
+			billboardGui:SetAttribute("UUID", UUID)
+
+			att.Parent = self.CamPart
+
+			self._layers1[i] = billboardGui
+		else
+			if not billboardGui.Enabled then
+				continue
+			end
+			billboardGui.Size = UDim2.fromOffset(viewport.X, viewport.Y)
+			local frame = billboardGui:FindFirstChild("InnerFrame")
+			if frame then
+			frame.BackgroundTransparency = self.Transparency
+			att = billboardGui.Parent
+			if not att:IsA("Attachment") then
+				continue
+			end
+			end
+		end
+		
+		local beamPosition = att.WorldPosition
+		local UUID = billboardGui:GetAttribute("UUID")
+		if not UUID then
+			warn("Missing UUID for beam, index: ", i)
+			continue
+		end
+		local identifier = "billboard_" .. UUID
+		
+		
+		BatchLoadingModule.QueueCheck(beamPosition, identifier)
+		att.Position = Vector3.new(0, 0, -index)
+	end
+	
+	BatchLoadingModule._BatchCompletedEvent.Event:Once(function(results)
+		warn("Batch has triggered.")
+		if not results or not results[1] then
+			warn("Invalid Results")
+			return
+		end
+	for i = 1, self.Depth do
+		
+		local billboardGui = self._layers1[i]
+		local UUID = billboardGui:GetAttribute("UUID")
+		if not UUID then
+			warn("Missing UUID for beam, index: ", i)
+			continue
+		end
+		local identifier = "billboard_" .. UUID
+		local result = results[1][identifier]
+		warn("result is..",result)
+		
+		if result == true then
+			billboardGui.Enabled = self.Visible
+		elseif result == false or result == nil then
+			print("DISTANCE IS NIL...")
+			billboardGui.Enabled = false
+		end
+		end
+	end)
+end
+
+local function renderBeamVolumetrics(self)
+	self.CamPart.Size = Vector3.new(1, 1, 1)
+
+	local fov = self._camFov
+	local viewport = self._camViewport
+	local tan = math.tan(math.rad(fov / 2))
+	local ratioY = (0.1 * tan) / 0.1
+	local ratioX = (0.1 * viewport.X * tan) / viewport.Y / 0.1
+
+	if #self._layers > 0 then
+		for i, v in pairs(self._layers) do
+			if i > self.Depth then
+				v.Enabled = false
+				continue
+			end
+			v.Enabled = self.Visible
+		end
+	end
+
+	local yScale = (math.max(self.LayerSpacing, 1) * 2)
+	for i = 1, self.Depth do
+		local index = (i-1) * self.LayerSpacing
+		local beam = self._layers[i]
+		local att0: Attachment
+		local att1: Attachment
+
+		if beam == nil then
+			beam = createVolumetricBeam(self, self.Transparency, self.LightEmission, ratioX, ratioY, self.LayerSpacing, index)
+			att0 = Instance.new("Attachment")
+			att1 = Instance.new("Attachment")
+
+			beam.Name = "Beam"..tostring(i)
+			att0.Name = "AttachmentA"..tostring(i)
+			att1.Name = "AttachmentB"..tostring(i)
+
+			beam.Attachment0 = att0
+			beam.Attachment1 = att1
+
+			beam.Parent = self.CamPart
+			att0.Parent = self.CamPart
+			att1.Parent = self.CamPart
+			
+			local UUID = self._layerBeamUUIDs[i]
+			if not UUID then
+				UUID = HTTPService:GenerateGUID(false)
+				self._layerBeamUUIDs[i] = UUID
+			end
+			beam:SetAttribute("UUID", UUID)
+
+			self._layers[i] = beam
+		else
+			if not beam.Enabled then
+				continue
+			end
+			beam.Width0 = (ratioY * index) * yScale
+			beam.Width1 = (ratioY * index) * yScale
+			beam.Transparency = NumberSequence.new(self.Transparency)
+			beam.LightEmission = self.LightEmission
+			att0 = beam.Attachment0
+			att1 = beam.Attachment1
+		end
+		
+		local UUID = beam:GetAttribute("UUID")
+		if not UUID then
+			warn("Missing UUID for beam, index: ", i)
+			continue
+		end
+		local identifier = "beam_" .. UUID
+		att0.Position = Vector3.new((ratioX * index), 0, -index)
+		att1.Position = Vector3.new(-(ratioX * index), 0, -index)
+		local beamPosition = att0.WorldPosition
+		BatchLoadingModule.QueueCheck(beamPosition, identifier)
+	end
+
+	BatchLoadingModule._BatchCompletedEvent.Event:Once(function(results)
+		warn("Batch has triggered.")
+		if not results or not results[1] then
+			warn("Invalid Results")
+			warn(results)
+			return
+		end
+	for i = 1, self.Depth do
+		local beam = self._layers[i]
+		local UUID = beam:GetAttribute("UUID")
+			if not UUID then
+				warn("Missing UUID for beam, index: ", i)
+				continue
+			end
+		local identifiers = "beam_" .. UUID
+		local result = results[1][identifiers]
+		warn("THE RESULT IS::" .. tostring(result))
+		
+		if result == true then
+			beam.Enabled = self.Visible
+		elseif result == false or result == nil then
+			
+			print("DISTANCE IS NIL...")
+			beam.Enabled = false
+		end
+		end
+	end)
+end
+
+local flip = false
+
+local function cleanUp(self)
+	-- Clear distance results for this volumetric instance
+	-- Always clean up existing elements
+	for i, v in pairs(self._layers) do
+		if v:IsA("Beam") then
+			if v.Attachment0 then v.Attachment0:Destroy() end
+			if v.Attachment1 then v.Attachment1:Destroy() end
+		end
+		v:Destroy()
+	end
+
+	for i, v in pairs(self._layers1) do
+		if v:IsA("BillboardGui") then
+			local parent = v.Parent
+			if parent and parent:IsA("Attachment") then
+				parent:Destroy()
+			end
+			v:Destroy()
+		end
+	end
+
+	table.clear(self._layers)
+	table.clear(self._layers1)
+	table.clear(self._layerBeamUUIDs)
+	table.clear(self._layerBillboardUUIDs)
+
+	-- Only do the full part cleanup if render method changed
+	if self.RenderMethod ~= self._previousRenderMethod then
+		for _, v in pairs(self.CamPart:GetChildren()) do
+			if v:IsA("ParticleEmitter") then
+				continue
+			end
+			v:Destroy()
+		end
+		self.Particles.Parent = script
+		self.Particles.Enabled = false
+		self._previousRenderMethod = self.RenderMethod
+	end
+end
+
+local Volumetrics = {}
+Volumetrics.__index = Volumetrics
+Volumetrics.Enum = {
+	Beams = 1;
+	Billboards = 2;
+	Particles = 3;
+	Trails = 4;
+}
+
+function Volumetrics.new(camera: Camera, depth: number, layerSpacing: number, renderMethod: number?, VolumetricQuality: string)
+	local self = setmetatable({}, Volumetrics)
+	self.VolumetricQuality = VolumetricQuality
+	self.Camera = camera
+	self.Depth = depth
+	self.LayerSpacing = layerSpacing
+	self.LayerSpacing1 = 100
+	self.LastCFrame = camera.CFrame
+	print(tostring(camera.CFrame))
+	self.Transparency = 0.996
+	self.LightEmission = 1
+	self.Visible = true
+	self.RenderMethod = Volumetrics.Enum.Beams
+	self.Particles = script.ParticleEmitter:Clone()
+	self._layerBeamUUIDs = {}
+	self._layerBillboardUUIDs = {}
+
+	if not self.CamPart then
+		self.CamPart = cameraPart:Clone()
+	end
+
+	self._camFov = camera.FieldOfView
+	self._camViewport = camera.ViewportSize
+	print("Size: " .. tostring(self._camViewport))
+	self._layers = {}
+	self._layers1 = {}
+	self._previousRenderMethod = Volumetrics.Enum.Beams
+
+	self.CamPart.Parent = camera
+
+	self:RenderVolumetrics()
+
+	self._cameraChangedConnection = self.Camera.Changed:Connect(function(property: string)
+		if property == "FieldOfView" then
+			self._camFov = self.Camera.FieldOfView
+			self:RenderVolumetrics()
+		elseif property == "ViewportSize" then
+			self._camViewport = self.Camera.ViewportSize
+			self:RenderVolumetrics()
+		end
+	end)
+	
+	task.defer(function()
+		task.wait()
+		self._camFov = camera.FieldOfView
+		self._camViewport = camera.ViewportSize
+		self:RenderVolumetrics()
+	end)
+
+	return self
+end
+
+function Volumetrics:RenderVolumetrics()
+	-- Always clean up first
+	for i, v in pairs(self._layers) do
+		if v:IsA("Beam") then
+			if v.Attachment0 then v.Attachment0:Destroy() end
+			if v.Attachment1 then v.Attachment1:Destroy() end
+		end
+		v:Destroy()
+	end
+
+	for i, v in pairs(self._layers1) do
+		if v:IsA("BillboardGui") then
+			if v.Parent then v.Parent:Destroy() end
+		end
+		v:Destroy()
+	end
+
+	table.clear(self._layers)
+	table.clear(self._layers1)
+	
+	-- Then render new ones
+	self.Particles.Parent = script
+	
+	--BatchLoadingModule.ClearResults()
+	--BatchLoadingModule.ResetQueue()
+	
+	if self.VolumetricQuality == "Max" or RunService:IsStudio() then
+		renderBeamVolumetrics(self)
+		renderBillboardVolumetrics(self)
+		print("Rendered Beams and Billboards on Max Quality.")
+	elseif self.VolumetricQuality == "Medium" then
+		renderBeamVolumetrics(self)
+		print("Rendered Beams on Medium Quality.")
+	else
+		return warn("No Volumetric Setup. 1/1")
+	end
+	
+	BatchLoadingModule.ProcessBatch()
+end
+
+local rayparams = RaycastParams.new()
+rayparams.IgnoreWater = true
+rayparams.FilterType = Enum.RaycastFilterType.Exclude
+
+function Volumetrics:UpdateVolumetrics(dt: number)
+	local currentCFrame = self.Camera.CFrame
+
+		self.CamPart.CFrame = self.Camera.CFrame
+		self.LastCFrame = currentCFrame
+end
+
+function Volumetrics:Destroy()
+	-- Clear distance results for this volumetric instance
+	for identifier, _ in pairs(BatchLoadingModule._results) do
+		if string.find(identifier, "beam_") or string.find(identifier, "billboard_") then
+			BatchLoadingModule._results[identifier] = nil
+		end
+	end
+
+	for _, v in ipairs(self._layers) do
+		if v:IsA("Beam") then
+			v.Attachment0:Destroy()
+			v.Attachment1:Destroy()
+		end
+		v:Destroy()
+	end
+
+	for _, v in ipairs(self._layers1) do
+		if v:IsA("BillboardGui") then
+			if v.Parent then
+				v.Parent:Destroy()
+			end
+		end
+		v:Destroy()
+	end
+
+	if self._cameraChangedConnection then
+		self._cameraChangedConnection:Disconnect()
+		self._cameraChangedConnection = nil
+	end
+
+	self.Particles:Destroy()
+	self.CamPart:Destroy()
+
+	table.clear(self._layers)
+	table.clear(self._layers1)
+	table.clear(self._layerBeamUUIDs)
+	table.clear(self._layerBillboardUUIDs)
+	table.clear(self)
+	table.freeze(self)
+end
+
+return Volumetrics
