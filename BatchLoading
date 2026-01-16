@@ -1,0 +1,165 @@
+local RunService = game:GetService("RunService")
+local ParallelScheduler = require(workspace.ParallelScheduler)
+local DistanceModule = script.Parent.ParallelModules.Distance
+local DistanceRunner = ParallelScheduler:LoadModule(DistanceModule)
+local Player = game.Players.LocalPlayer
+local BatchLoadingManager = {}
+local MaximumDistance = 60
+
+----------------------------------
+
+BatchLoadingManager.__index = BatchLoadingManager
+BatchLoadingManager._queue = {}
+BatchLoadingManager._results = {}
+BatchLoadingManager._ChecksFinished = {}
+BatchLoadingManager._pendingCallbacks = {}
+BatchLoadingManager._LastBatchTime = 0
+BatchLoadingManager._BatchInterval = 0.05
+BatchLoadingManager._MaxBatch = 300
+BatchLoadingManager._BatchCompletedEvent = script.Event
+
+----------------------------------
+
+local lastDistanceCheck = 0
+local cachedPlayerPos = nil
+local MAX_RETRIES = 2
+local RETRY_DELAY = 0.2
+
+-----------------------------------
+
+function BatchLoadingManager.QueueCheck(position, identifier)
+	if not position or typeof(position) ~= "Vector3" then
+		warn("queueDistanceCheck: Invalid position provided")
+		return false
+	end
+
+	print("Queued:", identifier)
+
+	table.insert(BatchLoadingManager._queue, {
+		position = position,
+		id = identifier
+	})
+	
+	return BatchLoadingManager._results[identifier]
+end
+
+function BatchLoadingManager.ProcessBatch()
+	local now = tick()
+
+	if now - BatchLoadingManager._LastBatchTime < BatchLoadingManager._BatchInterval then return end
+	if #BatchLoadingManager._queue == 0 or #BatchLoadingManager._queue < BatchLoadingManager._MaxBatch then return end
+
+	local success, result = pcall(function()
+		-- Get current player position
+		local character = Player.Character
+		local rootPart = character and character:FindFirstChild("HumanoidRootPart")
+		cachedPlayerPos = rootPart and rootPart.Position or nil
+
+		if not cachedPlayerPos then
+			BatchLoadingManager._BatchCompletedEvent:Fire(BatchLoadingManager._results)
+			warn("CACHEDPLAYERPOS FAILED.")
+			return false
+		end
+
+
+		-- Prepare batch data for parallel processing
+		local batchPositions = {}
+		local batchIdentifiers = {}
+
+		-- Take up to MAX_BATCH_SIZE items from pending checks
+		local processingCount = math.min(#BatchLoadingManager._queue, BatchLoadingManager._MaxBatch)
+
+		for i = 1, processingCount do
+			local checkData = BatchLoadingManager._queue[i]
+			table.insert(batchPositions, {checkData.position.X, checkData.position.Y, checkData.position.Z})
+			table.insert(batchIdentifiers, checkData.id)
+		end
+		
+		for i, id in pairs(batchIdentifiers) do
+			print("Identifier[" .. i .. "] =", id)
+		end
+
+		-- Schedule the batch work
+		DistanceRunner:ScheduleWork(cachedPlayerPos, MaximumDistance, batchPositions, #batchPositions, batchIdentifiers)
+		print("Scheduled batch with", #batchPositions, "positions")
+		print("From pos:", cachedPlayerPos)
+
+		local startTime = tick()
+		local TIMEOUT = 5
+
+		repeat
+			RunService.Heartbeat:Wait()
+			local status = DistanceRunner:GetStatus()
+			if tick() - startTime > TIMEOUT then
+				warn("DistanceRunner job timed out")
+				BatchLoadingManager._BatchCompletedEvent:Fire(BatchLoadingManager._results)
+				return
+			end
+		until not status.IsWorking
+
+		local success, batchResults
+		
+		for attempt = 1, MAX_RETRIES + 1 do
+			success, batchResults = pcall(function()
+				return DistanceRunner:Work()
+			end)
+
+			if success and type(batchResults) == "table" then
+				break
+			elseif attempt <= MAX_RETRIES then
+				warn(string.format("[DistanceRunner] Attempt %d failed, retrying...", attempt))
+				task.wait(RETRY_DELAY)
+			else
+				warn("[DistanceRunner] All attempts failed:", batchResults)
+				for _, identifier in ipairs(batchIdentifiers) do
+					BatchLoadingManager._results[identifier] = false
+				end
+				BatchLoadingManager._BatchCompletedEvent:Fire(BatchLoadingManager._results)
+				return
+			end
+		end
+		
+		if batchResults and type(batchResults) == "table" then
+			for uuid, result in pairs(batchResults) do
+				local identifier = batchIdentifiers[uuid]
+				print("[DISTANCE RESULT] Setting:", identifier, "=>", result)
+				if identifier then
+					warn("Identified Correctly.")
+					BatchLoadingManager._results[uuid] = result
+				end
+			end
+		end
+		
+		BatchLoadingManager._BatchCompletedEvent:Fire(BatchLoadingManager._results)
+		warn("Fired has past.")
+		warn(BatchLoadingManager._results)
+
+		for i, pos in pairs(batchPositions) do
+			print("[" .. i .. "] =", pos[1], pos[2], pos[3])
+		end
+
+		-- Remove processed items from pending queue
+		for i = processingCount, 1, -1 do
+			table.remove(BatchLoadingManager._queue, i)
+		end
+
+		BatchLoadingManager._LastBatchTime = now
+		return true
+	end)
+
+	if not success then
+		warn("Error in processBatchedDistanceChecks:", tostring(result))
+		BatchLoadingManager._BatchCompletedEvent:Fire()
+		table.clear(BatchLoadingManager._queue)
+	end
+end
+
+function BatchLoadingManager.ClearResults()
+	table.clear(BatchLoadingManager._results)
+end
+
+function BatchLoadingManager.ResetQueue()
+	table.clear(BatchLoadingManager._queue)
+end
+
+return BatchLoadingManager
