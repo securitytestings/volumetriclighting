@@ -1,0 +1,29 @@
+return function(playerPos, MaximumDistance, positions, PositionCount, identifiers)
+	if type(positions[1]) == "number" then
+		local targetPos = Vector3.new(positions[1], positions[2], positions[3])
+		local distance = (playerPos - targetPos).Magnitude
+		return distance <= MaximumDistance
+	else
+		-- Batch format: {{x1, y1, z1}, {x2, y2, z2}, ...}
+		local results = {}
+
+		for i = 1, PositionCount do
+			local position = positions[i]
+			local uuid = identifiers and identifiers[i] or i
+			
+			if position[1] and position[2] and position[3] then
+				local targetPos = Vector3.new(position[1], position[2], position[3])
+				local distance = (playerPos - targetPos).Magnitude
+				if distance <= MaximumDistance then
+					results[uuid] = true
+				elseif distance > MaximumDistance then
+					results[uuid] = false
+				end
+			else
+				results[uuid] = false
+			end
+		end
+
+		return results
+	end
+end
