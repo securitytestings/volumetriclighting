@@ -5,6 +5,8 @@ Forked from a plugin by NOPESbucket, heavily optimised with new features.
 
 May include bugs. I'm updating it as much as possible.
 
+Has been tested on mobile and PC. Console may be supported but untested, im unsure about VR.
+
 Current Performance Stats:
 
 CPU: Intel Xeon W2123
