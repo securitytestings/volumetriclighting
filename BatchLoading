@@ -1,156 +1,130 @@
-local RunService = game:GetService("RunService")
-local ParallelScheduler = require(workspace.ParallelScheduler)
-local DistanceModule = script.Parent.ParallelModules.Distance
-local DistanceRunner = ParallelScheduler:LoadModule(DistanceModule)
-local Player = game.Players.LocalPlayer
+local Players = game:GetService("Players")
+local Player = Players.LocalPlayer
+
 local BatchLoadingManager = {}
-local MaximumDistance = 60
 
 ----------------------------------
+-- config
 
-BatchLoadingManager.__index = BatchLoadingManager
+BatchLoadingManager.MaximumDistance = 60
+
+local BATCH_INTERVAL = 0.05 -- min seconds between batches
+local MAX_BATCH = 300       -- max checks per batch; the rest roll into the next one
+local NO_PLAYER_RETRY = 0.5 -- seconds to wait when the character isn't ready
+
+----------------------------------
+-- state
+
 BatchLoadingManager._queue = {}
+BatchLoadingManager._queued = {}
 BatchLoadingManager._results = {}
-BatchLoadingManager._ChecksFinished = {}
-BatchLoadingManager._pendingCallbacks = {}
-BatchLoadingManager._LastBatchTime = 0
-BatchLoadingManager._BatchInterval = 0.05
-BatchLoadingManager._MaxBatch = 300
-BatchLoadingManager._BatchCompletedEvent = script.Event
+
+local listeners = {}
+local lastBatchTime = 0
+local retryScheduled = false
 
 ----------------------------------
+-- queue
 
-local lastDistanceCheck = 0
-local cachedPlayerPos = nil
-local MAX_RETRIES = 2
-local RETRY_DELAY = 0.2
-
------------------------------------
-
-function BatchLoadingManager.QueueCheck(position, identifier)
-	if not position or typeof(position) ~= "Vector3" then
-		warn("queueDistanceCheck: Invalid position provided")
-		return false
+function BatchLoadingManager.QueueCheck(position: Vector3, identifier: string)
+	if typeof(position) ~= "Vector3" then
+		warn("QueueCheck: Invalid position provided")
+		return nil
 	end
 
-	print("Queued:", identifier)
+	local existing = BatchLoadingManager._queued[identifier]
+	if existing then
+		existing.position = position
+	else
+		local entry = {position = position, id = identifier, cancelled = false}
+		BatchLoadingManager._queued[identifier] = entry
+		table.insert(BatchLoadingManager._queue, entry)
+	end
 
-	table.insert(BatchLoadingManager._queue, {
-		position = position,
-		id = identifier
-	})
-	
 	return BatchLoadingManager._results[identifier]
 end
 
-function BatchLoadingManager.ProcessBatch()
-	local now = tick()
+function BatchLoadingManager.Forget(identifier: string)
+	local entry = BatchLoadingManager._queued[identifier]
+	if entry then
+		entry.cancelled = true
+		BatchLoadingManager._queued[identifier] = nil
+	end
+	BatchLoadingManager._results[identifier] = nil
+end
 
-	if now - BatchLoadingManager._LastBatchTime < BatchLoadingManager._BatchInterval then return end
-	if #BatchLoadingManager._queue == 0 or #BatchLoadingManager._queue < BatchLoadingManager._MaxBatch then return end
+----------------------------------
+-- listeners
 
-	local success, result = pcall(function()
-		-- Get current player position
-		local character = Player.Character
-		local rootPart = character and character:FindFirstChild("HumanoidRootPart")
-		cachedPlayerPos = rootPart and rootPart.Position or nil
+function BatchLoadingManager.OnBatchCompleted(callback)
+	listeners[callback] = true
+	return function()
+		listeners[callback] = nil
+	end
+end
 
-		if not cachedPlayerPos then
-			BatchLoadingManager._BatchCompletedEvent:Fire(BatchLoadingManager._results)
-			warn("CACHEDPLAYERPOS FAILED.")
-			return false
-		end
+----------------------------------
+-- processing
 
+local function scheduleProcess(delay: number)
+	if retryScheduled then return end
+	retryScheduled = true
 
-		-- Prepare batch data for parallel processing
-		local batchPositions = {}
-		local batchIdentifiers = {}
-
-		-- Take up to MAX_BATCH_SIZE items from pending checks
-		local processingCount = math.min(#BatchLoadingManager._queue, BatchLoadingManager._MaxBatch)
-
-		for i = 1, processingCount do
-			local checkData = BatchLoadingManager._queue[i]
-			table.insert(batchPositions, {checkData.position.X, checkData.position.Y, checkData.position.Z})
-			table.insert(batchIdentifiers, checkData.id)
-		end
-		
-		for i, id in pairs(batchIdentifiers) do
-			print("Identifier[" .. i .. "] =", id)
-		end
-
-		-- Schedule the batch work
-		DistanceRunner:ScheduleWork(cachedPlayerPos, MaximumDistance, batchPositions, #batchPositions, batchIdentifiers)
-		print("Scheduled batch with", #batchPositions, "positions")
-		print("From pos:", cachedPlayerPos)
-
-		local startTime = tick()
-		local TIMEOUT = 5
-
-		repeat
-			RunService.Heartbeat:Wait()
-			local status = DistanceRunner:GetStatus()
-			if tick() - startTime > TIMEOUT then
-				warn("DistanceRunner job timed out")
-				BatchLoadingManager._BatchCompletedEvent:Fire(BatchLoadingManager._results)
-				return
-			end
-		until not status.IsWorking
-
-		local success, batchResults
-		
-		for attempt = 1, MAX_RETRIES + 1 do
-			success, batchResults = pcall(function()
-				return DistanceRunner:Work()
-			end)
-
-			if success and type(batchResults) == "table" then
-				break
-			elseif attempt <= MAX_RETRIES then
-				warn(string.format("[DistanceRunner] Attempt %d failed, retrying...", attempt))
-				task.wait(RETRY_DELAY)
-			else
-				warn("[DistanceRunner] All attempts failed:", batchResults)
-				for _, identifier in ipairs(batchIdentifiers) do
-					BatchLoadingManager._results[identifier] = false
-				end
-				BatchLoadingManager._BatchCompletedEvent:Fire(BatchLoadingManager._results)
-				return
-			end
-		end
-		
-		if batchResults and type(batchResults) == "table" then
-			for uuid, result in pairs(batchResults) do
-				local identifier = batchIdentifiers[uuid]
-				print("[DISTANCE RESULT] Setting:", identifier, "=>", result)
-				if identifier then
-					warn("Identified Correctly.")
-					BatchLoadingManager._results[uuid] = result
-				end
-			end
-		end
-		
-		BatchLoadingManager._BatchCompletedEvent:Fire(BatchLoadingManager._results)
-		warn("Fired has past.")
-		warn(BatchLoadingManager._results)
-
-		for i, pos in pairs(batchPositions) do
-			print("[" .. i .. "] =", pos[1], pos[2], pos[3])
-		end
-
-		-- Remove processed items from pending queue
-		for i = processingCount, 1, -1 do
-			table.remove(BatchLoadingManager._queue, i)
-		end
-
-		BatchLoadingManager._LastBatchTime = now
-		return true
+	task.delay(delay, function()
+		retryScheduled = false
+		BatchLoadingManager.ProcessBatch()
 	end)
+end
 
-	if not success then
-		warn("Error in processBatchedDistanceChecks:", tostring(result))
-		BatchLoadingManager._BatchCompletedEvent:Fire()
-		table.clear(BatchLoadingManager._queue)
+function BatchLoadingManager.ProcessBatch()
+	local queue = BatchLoadingManager._queue
+	local total = #queue
+	if total == 0 then return end
+
+	local sinceLast = os.clock() - lastBatchTime
+	if sinceLast < BATCH_INTERVAL then
+		scheduleProcess(BATCH_INTERVAL - sinceLast)
+		return
+	end
+
+	local character = Player.Character
+	local rootPart = character and character:FindFirstChild("HumanoidRootPart")
+	if not rootPart then
+		scheduleProcess(NO_PLAYER_RETRY)
+		return
+	end
+	local playerPos = rootPart.Position
+
+	local maxDistance = BatchLoadingManager.MaximumDistance
+	local maxSq = maxDistance * maxDistance
+	local results = BatchLoadingManager._results
+	local queued = BatchLoadingManager._queued
+
+	local count = math.min(total, MAX_BATCH)
+	for i = 1, count do
+		local entry = queue[i]
+		if queued[entry.id] == entry then
+			queued[entry.id] = nil
+		end
+		if not entry.cancelled then
+			local d = entry.position - playerPos
+			results[entry.id] = d:Dot(d) <= maxSq
+		end
+	end
+
+	table.move(queue, count + 1, total, 1)
+	for i = total - count + 1, total do
+		queue[i] = nil
+	end
+
+	lastBatchTime = os.clock()
+
+	for callback in listeners do
+		task.spawn(callback, results)
+	end
+
+	if #queue > 0 then
+		scheduleProcess(BATCH_INTERVAL)
 	end
 end
 
@@ -159,7 +133,11 @@ function BatchLoadingManager.ClearResults()
 end
 
 function BatchLoadingManager.ResetQueue()
+	for _, entry in BatchLoadingManager._queue do
+		entry.cancelled = true
+	end
 	table.clear(BatchLoadingManager._queue)
+	table.clear(BatchLoadingManager._queued)
 end
 
 return BatchLoadingManager
