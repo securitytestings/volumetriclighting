@@ -35,21 +35,6 @@ local function createVolumetricBeam(self, transparency: number, lightEmission: n
 	return beam
 end
 
-local function WaitForBatch()
-	local completed = false
-
-	local conn
-	conn = script.Parent.BatchLoading.Event.Event:Connect(function()
-		completed = true
-		conn:Disconnect()
-	end)
-
-	repeat RunService.Heartbeat:Wait() until completed
-
-	RunService.RenderStepped:Wait()
-	RunService.RenderStepped:Wait()
-end
-
 local function createVolumetricBillboard(self, transparency: number, viewportSize: Vector2)
 	local billboard = Instance.new("BillboardGui")
 	local frame = Instance.new("Frame")
@@ -106,61 +91,32 @@ local function renderBillboardVolumetrics(self)
 
 			self._layers1[i] = billboardGui
 		else
-			if not billboardGui.Enabled then
-				continue
-			end
 			billboardGui.Size = UDim2.fromOffset(viewport.X, viewport.Y)
 			local frame = billboardGui:FindFirstChild("InnerFrame")
 			if frame then
-			frame.BackgroundTransparency = self.Transparency
+				frame.BackgroundTransparency = self.Transparency
+			end
 			att = billboardGui.Parent
 			if not att:IsA("Attachment") then
 				continue
 			end
-			end
 		end
-		
-		local beamPosition = att.WorldPosition
-		local UUID = billboardGui:GetAttribute("UUID")
-		if not UUID then
-			warn("Missing UUID for beam, index: ", i)
-			continue
-		end
-		local identifier = "billboard_" .. UUID
-		
-		
-		BatchLoadingModule.QueueCheck(beamPosition, identifier)
-		att.Position = Vector3.new(0, 0, -index)
-	end
-	
-	BatchLoadingModule._BatchCompletedEvent.Event:Once(function(results)
-		warn("Batch has triggered.")
-		if not results or not results[1] then
-			warn("Invalid Results")
-			return
-		end
-	for i = 1, self.Depth do
-		
-		local billboardGui = self._layers1[i]
-		local UUID = billboardGui:GetAttribute("UUID")
-		if not UUID then
-			warn("Missing UUID for beam, index: ", i)
-			continue
-		end
-		local identifier = "billboard_" .. UUID
-		local result = results[1][identifier]
-		warn("result is..",result)
-		
-		if result == true then
-			billboardGui.Enabled = self.Visible
-		elseif result == false or result == nil then
-			print("DISTANCE IS NIL...")
-			billboardGui.Enabled = false
-		end
-		end
-	end)
-end
 
+		local UUID = billboardGui:GetAttribute("UUID")
+		if not UUID then
+			warn("Missing UUID for billboard, index: ", i)
+			continue
+		end
+		local identifier = "billboard_" .. UUID
+
+		-- Position FIRST, then read WorldPosition (otherwise we'd queue a stale position)
+		att.Position = Vector3.new(0, 0, -index)
+		local beamPosition = att.WorldPosition
+
+		BatchLoadingModule.QueueCheck(beamPosition, identifier)
+	end
+end
+	
 local function renderBeamVolumetrics(self)
 	self.CamPart.Size = Vector3.new(1, 1, 1)
 
@@ -235,37 +191,6 @@ local function renderBeamVolumetrics(self)
 		BatchLoadingModule.QueueCheck(beamPosition, identifier)
 	end
 
-	BatchLoadingModule._BatchCompletedEvent.Event:Once(function(results)
-		warn("Batch has triggered.")
-		if not results or not results[1] then
-			warn("Invalid Results")
-			warn(results)
-			return
-		end
-	for i = 1, self.Depth do
-		local beam = self._layers[i]
-		local UUID = beam:GetAttribute("UUID")
-			if not UUID then
-				warn("Missing UUID for beam, index: ", i)
-				continue
-			end
-		local identifiers = "beam_" .. UUID
-		local result = results[1][identifiers]
-		warn("THE RESULT IS::" .. tostring(result))
-		
-		if result == true then
-			beam.Enabled = self.Visible
-		elseif result == false or result == nil then
-			
-			print("DISTANCE IS NIL...")
-			beam.Enabled = false
-		end
-		end
-	end)
-end
-
-local flip = false
-
 local function cleanUp(self)
 	-- Clear distance results for this volumetric instance
 	-- Always clean up existing elements
@@ -323,11 +248,10 @@ function Volumetrics.new(camera: Camera, depth: number, layerSpacing: number, re
 	self.LayerSpacing = layerSpacing
 	self.LayerSpacing1 = 100
 	self.LastCFrame = camera.CFrame
-	print(tostring(camera.CFrame))
 	self.Transparency = 0.996
 	self.LightEmission = 1
 	self.Visible = true
-	self.RenderMethod = Volumetrics.Enum.Beams
+	self.RenderMethod = renderMethod or Volumetrics.Enum.Beams
 	self.Particles = script.ParticleEmitter:Clone()
 	self._layerBeamUUIDs = {}
 	self._layerBillboardUUIDs = {}
@@ -338,12 +262,20 @@ function Volumetrics.new(camera: Camera, depth: number, layerSpacing: number, re
 
 	self._camFov = camera.FieldOfView
 	self._camViewport = camera.ViewportSize
-	print("Size: " .. tostring(self._camViewport))
 	self._layers = {}
 	self._layers1 = {}
-	self._previousRenderMethod = Volumetrics.Enum.Beams
+	self._previousRenderMethod = self.RenderMethod
 
+	-- Put the anchor where the camera is BEFORE rendering, so WorldPosition
+	-- of the attachments is correct on the very first distance check.
+	self.CamPart.CFrame = camera.CFrame
 	self.CamPart.Parent = camera
+
+	-- ONE persistent listener per instance. (Connecting a new :Once() on every
+	-- render stacked up callbacks whenever a batch was delayed or skipped.)
+	self._batchConnection = BatchLoadingModule._BatchCompletedEvent.Event:Connect(function(results)
+		self:_ApplyResults(results)
+	end)
 
 	self:RenderVolumetrics()
 
@@ -356,15 +288,41 @@ function Volumetrics.new(camera: Camera, depth: number, layerSpacing: number, re
 			self:RenderVolumetrics()
 		end
 	end)
-	
+
 	task.defer(function()
 		task.wait()
+		if not self.Camera then return end -- destroyed in the meantime
 		self._camFov = camera.FieldOfView
 		self._camViewport = camera.ViewportSize
 		self:RenderVolumetrics()
 	end)
 
 	return self
+end
+
+function Volumetrics:_ApplyResults(results)
+	if type(results) ~= "table" then return end
+
+	for _, beam in pairs(self._layers) do
+		local UUID = beam:GetAttribute("UUID")
+		if UUID then
+			local result = results["beam_" .. UUID]
+			-- nil means "not computed yet": leave the layer as it is
+			if result ~= nil then
+				beam.Enabled = result and self.Visible
+			end
+		end
+	end
+
+	for _, billboardGui in pairs(self._layers1) do
+		local UUID = billboardGui:GetAttribute("UUID")
+		if UUID then
+			local result = results["billboard_" .. UUID]
+			if result ~= nil then
+				billboardGui.Enabled = result and self.Visible
+			end
+		end
+	end
 end
 
 function Volumetrics:RenderVolumetrics()
@@ -386,24 +344,22 @@ function Volumetrics:RenderVolumetrics()
 
 	table.clear(self._layers)
 	table.clear(self._layers1)
-	
+
 	-- Then render new ones
 	self.Particles.Parent = script
-	
-	--BatchLoadingModule.ClearResults()
-	--BatchLoadingModule.ResetQueue()
-	
+
+	-- Make sure positions are computed from the camera's current CFrame
+	self.CamPart.CFrame = self.Camera.CFrame
+
 	if self.VolumetricQuality == "Max" or RunService:IsStudio() then
 		renderBeamVolumetrics(self)
 		renderBillboardVolumetrics(self)
-		print("Rendered Beams and Billboards on Max Quality.")
 	elseif self.VolumetricQuality == "Medium" then
 		renderBeamVolumetrics(self)
-		print("Rendered Beams on Medium Quality.")
 	else
 		return warn("No Volumetric Setup. 1/1")
 	end
-	
+
 	BatchLoadingModule.ProcessBatch()
 end
 
@@ -420,6 +376,12 @@ end
 
 function Volumetrics:Destroy()
 	-- Clear distance results for this volumetric instance
+
+	if self._batchConnection then
+		self._batchConnection:Disconnect()
+		self._batchConnection = nil
+	end
+
 	for identifier, _ in pairs(BatchLoadingModule._results) do
 		if string.find(identifier, "beam_") or string.find(identifier, "billboard_") then
 			BatchLoadingModule._results[identifier] = nil
