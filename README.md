@@ -9,7 +9,7 @@ https://www.roblox.com/games/73624956776308/Volumetric-Lighting-DEMO
 
 Has been tested on mobile and PC. Console may be supported but untested, im unsure about VR.
 
-Current Performance Stats:
+Version 1.1 Performance Stats:
 
 CPU: Intel Xeon W2123
 GPU: Nvidia GTX 1660 Super
