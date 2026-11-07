@@ -4,7 +4,8 @@ A module for Volumetric Lighting on ROBLOX. Includes heavy optimisation, and mul
 Forked from a plugin by NOPESbucket, heavily optimised with new features. 
 ParallelScheduler is not included, it can be found in the ROBLOX marketplace. A new ParallelScheduler will be custom written by me in the near future.
 
-May include bugs. I'm updating it as much as possible.
+May include bugs. A test place is linked underneath for you to test out the volumetric system.
+https://www.roblox.com/games/73624956776308/Volumetric-Lighting-DEMO
 
 Has been tested on mobile and PC. Console may be supported but untested, im unsure about VR.
 
